@@ -38,6 +38,8 @@ python main.py            # 没有 GHOST_PLUGIN_ID 就是独立模式：不读 s
 
 示例插件还带自测：`python test_plugin.py`（测试扮演宿主与 Ghost 的控制接口，只用标准库）。
 
+想在真 Ghost 里跑起来、又还没上架：用**开发者模式**从本地 `.gpkg` 安装（[`README.md`](README.md) 的「本地开发：开发者模式」）——不用签名，结构性检查与正式安装相同。
+
 ## 3. 密钥（一次性）
 
 ```bash

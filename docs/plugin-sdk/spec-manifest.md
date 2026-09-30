@@ -55,6 +55,11 @@
 
 ⚠️ **未知的权限名是整包拒绝**（`unknown_permission`），这是「忽略未知字段」的一个刻意例外。权限要逐条展示给用户确认，一个宿主不认识的权限名无法展示，而放过它等于让用户在一个看不见的条目上点了同意。代价是：将来 v2 新增权限名时，老宿主会拒装用了它的插件——这正是 `minAppVersion` 存在的意义，声明新权限的插件要同时抬高它。
 
+⚠️ **声明 `upstream.connect`（PR ⑩）有两条额外要求**，客户端的 `ParseManifest` 都**不**判，清单照样装得上——拒绝发生在别处：
+
+- **`entry` 必须是 `.exe`、`runtime.kind` 必须是 `"none"`（或缺省）。** Ghost 把连好的 socket 复制进宿主报告的那个 pid，并核对它的映像就是 `<包目录>\<entry>`；`.cmd`/`.py`/`.js` 入口被报告的是 `cmd.exe` 或解释器的 pid。任何别的组合，`upstream.tunnel` 永远答 `tunnel_unsupported`（[`spec-plugin-api.md`](spec-plugin-api.md) §10.1）。`gpkg.py pack` 在打包时就以工具码 `entry_kind_unsupported` 拒绝，免得一个用不了自己权限的插件被发布出去。
+- **发布描述的 `minAppVersion` ≥ `1.2.1`**（上一段说的正是这种情况）。`gpkg.py pack` 对更低的 `--min-app-version` 以工具码 `min_app_version_too_low` 拒绝。
+
 **注意这里没有 `paid` / `trialDays`。** 收费与否是官方注册表的字段，不是开发者自述的 —— 见 [`spec-release.md`](spec-release.md) §2.5。
 
 ## 3. `entry`
@@ -96,6 +101,8 @@
 `uiUrl` 必须是 `http://127.0.0.1:<port>/...`，见 [`spec-host-protocol.md`](spec-host-protocol.md) §3。端口不能是 23551（Ghost 自己的控制接口），也不能是 **80**（浏览器导航时会去掉默认端口，插件 frame 的端口绑定就永远对不上）。插件页把它放进名为 `ghost-plugin-<port>` 的 iframe；`uiUrl` 变了会换一个新 iframe（PR ⑤）。
 
 ⚠️ 该 iframe 与本地控制接口**不同源**：拿不到 `window.GHOST_TOKEN`，`fetch` 到控制接口会被源校验拒绝。插件 UI 要数据，走自己进程的 API，由插件进程用它自己的插件 token 去取。
+
+同一个 `uiUrl` 也会被 **Ghost 托管的独立窗口**加载（用户在插件页点「在新窗口打开」，PR ⑨），插件对两者不必区分；那个窗口的顶层导航同样只许 `http://127.0.0.1:<port>/`。插件自己画原生窗口是正当的（`ui.embedded:false`，Ghost 只显示运行状态）。在系统浏览器里打开 `uiUrl` 不是官方通道（[`README.md`](README.md)「插件界面的三种形态」）。
 
 ## 6. 校验在哪一侧
 

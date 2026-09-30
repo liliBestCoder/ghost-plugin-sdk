@@ -38,6 +38,7 @@ pwsh -NoProfile -File tools/plugin/sign.ps1 -Key <private.pem> -PublicKey    # �
 ```
 
 - `pack` 与 `check-registry` 只需要 Python 标准库；`keygen` / `sign` / `verify` / `verify-sig` 需要 `pip install cryptography`（Python ≥ 3.9）。
+- 声明了 `upstream.connect` 的插件：`pack` 要求 `--min-app-version 1.2.1` 或更高（否则 `min_app_version_too_low`），且入口必须是 `.exe`、`runtime.kind` 为 `none`（否则 `entry_kind_unsupported`）。这两条是工具检查，见 [`spec-errors.md`](docs/plugin-sdk/spec-errors.md) 末段。
 - 退出码：`0` 通过；`1` 检查失败，输出 `error: <原因码>: <原因>`，原因码见 [`spec-errors.md`](docs/plugin-sdk/spec-errors.md)；`2` 用法错误或缺 `cryptography`。
 - **这些工具是便利，不是闸门**：每条规则都是客户端 C++ 实现的 Python 镜像，让你在自己机器上先发现问题。两边不一致时，以客户端为准。
 
@@ -49,7 +50,7 @@ pwsh -NoProfile -File tools/plugin/sign.ps1 -Key <private.pem> -PublicKey    # �
 | [`publish-walkthrough.md`](docs/plugin-sdk/publish-walkthrough.md) | 从建仓库到用户装上的逐条命令 |
 | [`spec-manifest.md`](docs/plugin-sdk/spec-manifest.md) | `manifest.json` |
 | [`spec-host-protocol.md`](docs/plugin-sdk/spec-host-protocol.md) | 与宿主的握手协议 |
-| [`spec-plugin-api.md`](docs/plugin-sdk/spec-plugin-api.md) | 插件 token 与六个权限 |
+| [`spec-plugin-api.md`](docs/plugin-sdk/spec-plugin-api.md) | 插件 token 与七个权限（第七个 `upstream.connect`：经用户的上游节点建连接，见 §10） |
 | [`spec-release.md`](docs/plugin-sdk/spec-release.md) | 签名、Release 资产、上架与换钥 |
 | [`spec-license.md`](docs/plugin-sdk/spec-license.md) | 付费插件的许可 |
 | [`spec-store-bridge.md`](docs/plugin-sdk/spec-store-bridge.md) | 商店页协议 `ghost-store/1` |
@@ -96,6 +97,7 @@ pwsh -NoProfile -File tools/plugin/sign.ps1 -Key <private.pem> -PublicKey    # p
 ```
 
 - `pack` and `check-registry` need only the Python standard library; `keygen` / `sign` / `verify` / `verify-sig` need `pip install cryptography` (Python 3.9+).
+- A plugin that declares `upstream.connect`: `pack` requires `--min-app-version 1.2.1` or later (else `min_app_version_too_low`), an `.exe` entry and `runtime.kind` `none` (else `entry_kind_unsupported`). Both are tool-side checks; see the end of [`spec-errors.md`](docs/plugin-sdk/spec-errors.md).
 - Exit codes: `0` ok; `1` a check failed, printed as `error: <reason code>: <why>` (codes in [`spec-errors.md`](docs/plugin-sdk/spec-errors.md)); `2` usage error or `cryptography` missing.
 - **These tools are a convenience, not the gate**: every rule is a Python mirror of the client's C++ one, so you find problems on your own machine first. Where the two disagree, the client is right.
 

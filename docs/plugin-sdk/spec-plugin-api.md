@@ -39,12 +39,17 @@ Origin: http://127.0.0.1:23551
 | `config.read` | `config.get` | **脱敏后**的配置，见 §4 |
 | `log.write` | `log.ingest` | 往应用日志写，见 §5 |
 | `plugin.assets` | `plugin.icon` | 读**你自己**包里的 `icon` |
+| `upstream.connect` | `upstream.list`、`upstream.tunnel` | **经用户的上游节点连接任意地址**：Ghost 建隧道、把连好的 socket 交给你的进程（TCP；在 UDP 中继已验证且健康的 SOCKS5 节点上还有 UDP）。见 §10。**Ghost 1.2.1 起** |
 
-表按**命令名**索引，不按路由路径 —— 权限判定发生在命令层，而「路由 ↔ 命令」在这个仓库是漂移高发区（`test_router` 与 `test_command_contract` 已经是两张各自手写的表，再加第三张只会更糟）。每条命令对应的路由在 §3–§6 各自写明。
+表按**命令名**索引，不按路由路径 —— 权限判定发生在命令层，而「路由 ↔ 命令」在这个仓库是漂移高发区（`test_router` 与 `test_command_contract` 已经是两张各自手写的表，再加第三张只会更糟）。每条命令对应的路由在 §3–§6 与 §10 各自写明。
 
 > ⚠️ **`events.read.data` 等同于用户的完整访问历史。** Data 平面携带每个被管目标的**每一次 DNS 查询与连接目的地**。对一个隐私工具来说这是全部数据里最敏感的那份，所以它和 `events.read.control` 是两个独立权限，用户可以只给后者。申请它要有真实理由，安装确认框会明确告诉用户这意味着什么。
 
-**v1 就这六个。** 没有任何写配置、改目标、启动注入类权限。数据面抓包、限速、PAT 注入是 issue #12 的子项目 D，三个插件各自立项，各自论证要新增哪个权限位——那类权限能做的事比上面几个大一个量级，不该顺带加进来。
+> ⚠️ **`upstream.connect` 是唯一一个以用户身份在网络上行事的权限**，其余六个只是读 Ghost 知道的东西。插件拿不到节点凭据，但它经这条路建立的每一条连接都以**用户的代理身份**出现在目的地面前。启用确认框在这一条下面另加一行警告（`plugins.perm_warn.upstream.connect`：只授予你信任的插件）。
+
+**v1 就这七个**：最初的六个（PR ②–④），加上 PR ⑩ 的 `upstream.connect`。没有任何写配置、改目标、启动注入类权限。数据面抓包、限速、PAT 注入是 issue #12 的子项目 D，三个插件各自立项，各自论证要新增哪个权限位——那类权限能做的事比上面几个大一个量级，不该顺带加进来；`upstream.connect` 就是这样单独立项、单独论证的一个（设计 `docs/superpowers/specs/2026-09-29-port-forwarder-plugin-design.md` Part A）。
+
+⚠️ **声明 `upstream.connect` 的插件，发布描述的 `minAppVersion` 必须 ≥ `1.2.1`。** 更老的 Ghost 不认识这个名字，按 [`spec-manifest.md`](spec-manifest.md) §2 整包拒绝（`unknown_permission`）——用户看到的是一个费解的码，而不是「请升级」。`gpkg.py pack` 对更低的 `--min-app-version` 以工具码 `min_app_version_too_low` 拒绝打包（默认值 `1.2.0` 也会被拒，要显式传 `--min-app-version 1.2.1`）。
 
 ### 2.1 默认拒绝
 
@@ -52,7 +57,7 @@ Origin: http://127.0.0.1:23551
 
 **只有已授予的权限算数。** 升级后新申请、还没被用户确认的权限（`pendingPermissions`）从不进 `start` 行，也就从不进这张表的判定——`test_plugin_service` 38p 钉住：一次把 `{stats.read}` 扩成 `{events.read.control}` 的升级之后，哪怕记录被启用，启动参数里仍是旧的 `{stats.read}`。清单里写了表外的名字，安装就以 `unknown_permission` 整包拒绝；即便如此，这张表对传进来的名字**再判一次**，不认识的名字什么都不放行。
 
-`test_plugin_permissions` 遍历**整张路由表**断言这一点，期望值是测试里**手写**的名单（不是从被测的表反推）：持有全部六个权限的插件恰好够得到六条命令，一个权限都没有的插件什么都够不到，宿主只够得到 `plugin.status`。每加一条新路由，若没有同时把它加进权限表，对插件的答案必然仍是拒绝。
+`test_plugin_permissions` 遍历**整张路由表**断言这一点，期望值是测试里**手写**的名单（不是从被测的表反推）：持有全部七个权限的插件恰好够得到八条路由命令（`events.stream` 不在路由表里，见 §2.2），只持有 `upstream.connect` 的恰好够得到 `upstream.list`/`upstream.tunnel` 两条，一个权限都没有的插件什么都够不到，宿主只够得到 `plugin.status`。每加一条新路由，若没有同时把它加进权限表，对插件的答案必然仍是拒绝。
 
 ### 2.2 `/events` 不在路由表里
 
@@ -157,7 +162,8 @@ GET /api/plugins/icon?id=<你自己的 id>
 写清楚以免浪费时间去试：
 
 - **界面的会话 token**，以及**宿主的 token**。
-- **未脱敏的上游凭据**。
+- **未脱敏的上游凭据**——`upstream.connect` 也不给：节点地址与凭据只在 Ghost 进程里用于握手，`upstream.list` 与 `upstream.tunnel` 的答复里都没有（§10.6 写着这为什么**不是**安全边界）。
+- **经上游的入站连接**（SOCKS5 BIND）与「只许用某几个节点」的每插件名单：`upstream.connect` 只有出站 CONNECT 与 UDP ASSOCIATE，给了就是全部节点。
 - **`targets.json`** —— 被管目标的路径、别名与环境变量，没有任何权限能读。
 - **修改任何配置**，包括你自己的 `settings`（该字段 v1 恒为 `{}`，没有写入路径）。
 - **启动、停止、注入任何目标进程。**
@@ -183,3 +189,105 @@ GET /api/plugins/icon?id=<你自己的 id>
 - **路由与响应字段**遵循主程序自身的兼容惯例：字段只增不减，按 key 取值而不是按位置。
 - 一个权限**放行的命令集合可能变大**（加新路由进去），**不会变小**；要收窄就是一个新权限名。
 - 协议版本升到 `v2` 时，`v1` 的插件至少再工作一个大版本。
+
+## 10. `upstream.connect` —— 经用户的上游节点连接（PR ⑩，Ghost 1.2.1 起）
+
+> 编号排在最后而不是插进 §7 之前：§1–§9 的章节号已被 SDK 示例与别的规范引用，插一节会让它们全部错位。
+
+**Ghost 建隧道，插件拿 socket。** 插件说「经节点 X，连 host:port」；Ghost（不是插件）连到节点、用节点的协议握手（SOCKS5 带 RFC 1929 凭据，或 HTTP CONNECT 带 RFC 7617 Basic），节点说隧道已通之后，用 `WSADuplicateSocketW` 把**连好的 socket 复制进你的进程**、关掉自己那份，把 `WSAPROTOCOL_INFOW` 的原始字节交给你。你收养它，得到一个普通的阻塞 socket，另一端就是目的地。**插件里不需要、也不应该有任何代理协议代码**；节点凭据从不离开 Ghost 进程。UDP 另有语义（§10.4）。
+
+实现：命令层 `CmdUpstreamList` / `CmdUpstreamTunnel`（`src/modules/api/service/command_handler.cpp`），隧道代理 `src/modules/proxy/service/plugin_tunnel.{h,cpp}`（`ghost_tunnel::Broker`），请求语法 `src/shared/policy_tunnel_target.h`。
+
+### 10.1 只给原生 x64 `.exe`、不依赖运行时的插件
+
+socket 被复制进**宿主报告的那个 pid**（[`spec-host-protocol.md`](spec-host-protocol.md) §4），而不是请求里说的任何东西——请求体里的 `pid` 从不被读取。所以：
+
+- 清单的 `entry` 必须是 `.exe`（不分大小写）**且** `runtime.kind` 是 `"none"`（或缺省）。别的组合一律 `tunnel_unsupported`（`HostBridge::TunnelTargetOf`）。`.cmd`/`.py`/`.js` 入口的被报告 pid 是 `cmd.exe` 或解释器，不是你的代码；一个声明了 runtime 的 `.exe` 其实照样被直接拉起，但规则只有一条、不开例外。`gpkg.py pack` 在打包时就以工具码 `entry_kind_unsupported` 拒绝这种组合（客户端的清单解析**接受**它——拒绝发生在运行时）。
+- **只支持 x64。** 一个 WOW64（32 位）进程答 `tunnel_unsupported`：收养一个复制进来的 socket 要有它自己的一套，v1 不做；「判断不出是不是 WOW64」同样拒绝。
+- 复制之前 Ghost 打开那个进程并核对：不是 WOW64（上一条）、还活着、**映像文件就是 `<pluginDir>\<entry>` 本身**（按卷序列号 + 128 位文件 id 比，不按路径字符串）；并且**在网络 I/O 之前**就核对——一个伪造的 pid 连一次经用户代理的连接都换不来。打不开、已退出、映像不符都是 `plugin_not_running`。进程句柄从核对一直持有到复制完成，pid 不会在这中间变成别的进程。
+
+### 10.2 `GET /api/upstream/list`（`upstream.list`）
+
+```json
+{ "status": "ok", "active": "n1",
+  "nodes": [ { "id": "n1", "name": "香港", "type": "socks5", "active": true, "valid": true, "udp": true },
+             { "id": "n2", "name": "办公室", "type": "http", "active": false, "valid": false, "udp": false } ] }
+```
+
+- 每个节点**恰好六个键**：`id`、`name`、`type`（`"socks5"` | `"http"`，`Mixed` 归一为 `http`）、`active`、`valid`（地址是否可用——`false` 的节点隧道答 `upstream_invalid`）、`udp`（UDP 闸门的全部四条子句：能力位、开关、SOCKS5 + 已验证、健康）。**没有地址、没有凭据、没有延迟。**
+- 顶层 `active` 是 `via:"active"` 此刻会用的那个节点的 id：**第一个** `active` 为布尔 `true` 的节点（与启动被管目标时选的是同一个），没有则 `null`。节点行上的 `active` 只是那个节点自己的字段，手改过的 `config.json` 里可能不止一个为真——以顶层为准。
+- 没有 `id` 的节点（手改的 `config.json`）不列出：它没法被 `via:"node"` 点名。
+- 会话（界面）也能调它，答同一份。解析**从不写日志**——地址非法的节点只是 `valid:false`，一个每秒 20 次的插件冲不掉 Control 环。
+- **不要长时间缓存。** 节点会被用户增删改，`udp` 随健康检测每几十秒到几分钟变化；缓存十秒左右即可。
+
+### 10.3 `POST /api/upstream/tunnel`（`upstream.tunnel`）
+
+```json
+{ "via": "node", "nodeId": "n1", "proto": "tcp", "host": "example.com", "port": 443 }
+```
+
+| 字段 | 规则 |
+|---|---|
+| `via` | `"active"`（激活节点）或 `"node"`（按 `nodeId`）。是显式字段而不是给 `nodeId` 一个魔法值——节点 id 是自由串 |
+| `nodeId` | 只在 `via:"node"` 时读，`^[A-Za-z0-9_.-]{1,64}$`。**只按 id 精确匹配**：一个 `name` 恰好等于它的节点不算；找不到就 `upstream_not_found`，**从不回落到激活节点**，也从不直连 |
+| `proto` | `"tcp"` 或 `"udp"`，区分大小写 |
+| `host` | **恰好是**三者之一，否则 `bad_target`：严格点分四段 IPv4（无前导零——`inet_addr` 把 `010` 读成八进制 8）；不带方括号的 IPv6（无 zone id，≤ 45 字节）；主机名（标签 1–63 个 `[A-Za-z0-9_-]`、不以 `-` 开头结尾、无空标签，**最后一个标签不能是数**：必须含字母且不是 `0x…`——于是 `127.1`、`1.2.3`、`0x7f000001` 不会被当成名字发出去，而代理可能把它们读成地址）。≤ 253 字节。主机名**以名字交给节点**（SOCKS5 ATYP 3，远程 DNS），本机不解析 |
+| `port` | JSON **整数**（`443.0`、`"443"` 是 `invalid_json`），1–65535（越界是 `bad_target`） |
+
+字段类型不对（缺失、不是字符串、`port` 不是整数）答 `invalid_json`，**先于**一切值检查；然后是语法（`bad_target`），然后才看有没有隧道代理、你的进程、节点——**每一个便宜的拒绝都在打开任何 socket 之前**。会话身份调它答 `permission_denied`（界面没有进程可以接收 socket）。
+
+**成功：**
+
+```json
+{ "status": "ok", "proto": "tcp",
+  "protocolInfo": "<标准 base64>", "protocolInfoBytes": 628,
+  "node": { "id": "n1", "name": "香港", "type": "socks5" } }
+```
+
+UDP 另有 `"maxPayload": <每个数据报的最大负载字节数>` 与 `"idleTimeoutMs": 120000`。`node` 告诉你实际用的是哪个节点（`via:"active"` 时尤其有用），同样没有地址与凭据。
+
+**收养：**
+
+```c
+// protocolInfo 按标准 base64 解码；解出来的字节数必须 == protocolInfoBytes == sizeof(WSAPROTOCOL_INFOW)
+WSAPROTOCOL_INFOW info;
+memcpy(&info, decoded, sizeof info);
+SOCKET s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                      &info, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+```
+
+- 大小对不上就**别调** `WSASocketW`——那是一次读越界。
+- **`info` 只能用一次。** 复制出来的是一个句柄，收养一次就消费了它；再收养一次不会得到第二个连接。
+- 带 `WSA_FLAG_NO_HANDLE_INHERIT`：否则你之后拉起的每个子进程都会继承一条经用户代理的连接。
+- TCP 的 socket 是**阻塞模式、没有收发超时**，也没挂任何事件或完成端口——按你自己的需要设（`TCP_NODELAY`、keepalive、超时）。TCP 隧道一经交出就完全是你的：Ghost 不跟踪它，停用插件、改节点都不会关掉它（停用会停掉你的进程，那时它随进程关闭）。
+- `getpeername` 显示的是**节点的地址**（你连着的是节点，目的地在它后面）。拿地址不需要任何权限，这不是泄漏，但也意味着节点地址对你不是秘密。
+
+### 10.4 UDP
+
+`proto:"udp"` 只在 SOCKS5 节点上、且该节点的 UDP 中继此刻**开启 + 已验证 + 健康**、`udpRelay` 能力位开着时可用——与 Ghost 给被管目标开 UDP 的是**同一个闸门**（[`../architecture/udp-relay.md`](../architecture/udp-relay.md)），`upstream.list` 的 `udp` 就是它；否则 `upstream_udp_unavailable`。
+
+Ghost 自己做 UDP ASSOCIATE 并**中继**：控制连接与到节点中继的 socket 都留在 Ghost 里，你拿到的是一对**已互相 connect 的回环 UDP socket** 中的一端。
+
+- **一个会话，一个目的地。** 你 `send` 裸负载（不带 SOCKS5 头），全部发往请求里的 `host:port`；要别的目的地就再开一个。
+- 超过 `maxPayload` 的数据报被**丢弃**（`65507 − 头长`，头长取决于目的地的形式），像 UDP 本来那样，不报错。
+- **只有来自目的地的回包会到你手里**：端口必须一致；目的地是字面地址时地址也必须一致；是主机名时只比端口（节点可能用它解析出的地址作答）。畸形的、分片的（`FRAG ≠ 0`）回包丢弃。
+- ⚠️ 有些 SOCKS5 中继的 UDP 不支持主机名目的地（ATYP 3）。这样的节点上用名字开的会话收不到回包——换成字面地址。
+- **关闭的信号是 `WSAECONNRESET`。** 中继被拆之后，你的下一次 `send` 之后的 `recv` 失败于它；读到它就当会话已结束、重开一个（如果还被允许）。
+- 中继在这些时候被拆：节点结束 association（控制连接上出现任何字节、EOF 或错误——RFC 1928 §7）；你的进程退出；**两个方向都没有数据报满 `idleTimeoutMs`**（入站的也算活动）；你关掉自己那端且之后有数据报回来；以及**不再被允许**——你的 token 变了（停用、卸载、宿主丢失、重启）、`udpRelay` 能力位关了、节点健康离开 Usable、节点被删、节点的地址/端口/用户名/密码被改、节点不再满足 UDP 闸门。「不再被允许」每秒核对一次（Ghost 的中继线程）。
+
+### 10.5 截止时间契约与失败
+
+- Ghost 为一次隧道请求阻塞至多 **10 秒**（连接节点 + 握手共用一个截止时间，连接本身另有 5 秒上限）。
+- ⚠️ **你至少要等 30 秒**（`kTunnelClientWaitMs`），而且**从不重试一个答复丢了的隧道请求**。答复里带着一个**已经复制进你进程**的 socket：你提前放弃、或答复在路上丢了，那个句柄就在你进程里泄漏到进程退出，而且连着一条经用户代理的连接。一次请求、一次收养，超时就当失败处理。
+- **握手之后马上调，`plugin_not_running` 是暂时的。** 宿主的 `running` 报告（带你的 pid）是异步送达的，而触发它的正是你刚写出的握手回执——握手后的第一个调用可能跑在它前面。短暂退避后重试几次（例如 200 ms 间隔、数秒为限）。
+- **fail closed，永远不回落直连。** 任何失败——节点不可达、超时、认证失败、拒绝、你的插件不被支持——都**不是**「那就直连吧」的理由：用户选节点正是为了不让目的地看到真实地址。转发类插件遇到失败就关掉客户端连接、记下错误码。Ghost 自己的每一条失败路径上，目的地都收不到任何直连。
+- `via:"active"` **只在打开时解析一次**：用户之后切换激活节点，已经建好的 TCP 隧道与 UDP 中继仍走原来的节点（UDP 中继在原节点被删或被改时才被拆）。新连接会用新的激活节点。
+- 失败的码见 [`spec-errors.md`](spec-errors.md) §9：`bad_target`、`upstream_not_found`、`upstream_invalid`、`upstream_udp_unavailable`、`upstream_unreachable`、`upstream_timeout`、`upstream_auth_failed`、`upstream_refused`、`plugin_not_running`、`tunnel_unsupported`、`tunnel_limit`、`tunnel_failed`、`tunnel_unavailable`；外加共用的 `invalid_json`、`permission_denied`、`rate_limited`。形状都是 `{"status":"error","error":"<码>"}`，HTTP 200（闸门的 401/403/429 除外）。
+
+### 10.6 预算、上限、日志与边界
+
+- **每一次 `list` 与 `tunnel` 都花一次 §1 的调用预算**（每秒 20、突发 100）——它就是一个插件能让 Ghost 经用户节点开连接的频率上限。另有在途与中继上限（[`spec-limits.md`](spec-limits.md) §7.2）：同时在建的隧道每插件 8、全局 32；同时存在的 UDP 中继每插件 32、全局 128；超出答 `tunnel_limit`。
+- 日志（Control 平面，`tag="Tunnel"`）：每次运行对每个（插件、节点、协议）的**第一次成功**记一条 Info——谁在用用户的代理身份；上游类失败（`upstream_unreachable`/`timeout`/`auth_failed`/`refused`）、节点结束 UDP association、中继到节点的那个 socket 出错，按（插件、节点、码）每 60 秒至多一条 Warn，带它代表的次数；因不再被允许而拆掉的中继记 Info。**从不记凭据，从不记目的地**；请求校验类的拒绝不记。
+- ⚠️ **「API 不交出凭据」不是安全边界。** 节点凭据以明文存在 `%LOCALAPPDATA%\GhostProxifier\config.json`，同用户的任何进程——包括你的插件——本来就能读它。这条设计的意义是让**诚实的**插件不必碰凭据、不必写代理协议代码，并让用户知道哪个插件在用他的代理身份（审计行），而不是挡住一个恶意插件。授予 `upstream.connect` 之前，用户要信任这个插件。
+- 被偷走的插件 token（[`../architecture/plugin-center.md`](../architecture/plugin-center.md) §7.11）能以你的身份开隧道，但 socket 只会被复制进**你的**进程（映像核对），不会进偷 token 的那个进程。映像核对从 Ghost 的数据根**按句柄逐级**打开 `plugins\<id>\<version>\<entry>`，不跟随任何 junction / 符号链接（这棵树同用户可写），再与目标进程映像比对文件身份——在 `<version>` 上种一个挂载点，换不来一个「对得上」的映像。
+- **重启窗口（已知边界）**：Ghost 拿到「你的进程」与建好隧道之间，你的插件若恰好被重启，TCP socket 会被交给**新**实例（同一个插件、同一个映像，核对照样通过）；新实例没有请求它，这一个句柄会留在新实例里直到它退出。UDP 中继不受此限：它的「仍被允许」判定比对的是请求时那个 token，重启即换 token，中继在一个检查周期内被拆掉。

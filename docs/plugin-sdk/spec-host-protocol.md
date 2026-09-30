@@ -137,7 +137,7 @@ hosted = "GHOST_PLUGIN_ID" in os.environ
 | `dataDir` | 宿主给 | 自己定，建议 `%LOCALAPPDATA%\<id>\`（**不要**去写 Ghost 的 `plugins\<id>\.data\`，那是 Ghost 拥有并会在卸载时删掉的目录） |
 | `license` | 宿主给声明 | 没有；要门控就自己收激活码，见 `spec-license.md` §7.1 |
 | `stopEvent` | 宿主给 | 没有；按普通程序处理 Ctrl+C / 关窗 |
-| UI | 回 `uiUrl` 给宿主嵌进 iframe | 自己开浏览器（`os.startfile(url)`）或打印地址 |
+| UI | 回 `uiUrl` 给宿主嵌进 iframe | 自己开浏览器（`os.startfile(url)`）或打印地址（只在独立模式；宿主模式下不要这么做，见 [`README.md`](README.md)「插件界面的三种形态」） |
 | 单实例 | 宿主保证每个插件只有一个 | **不保证**。用户可能在 Ghost 里启用了它、又手动开了一个——别假设单实例，端口用 `0`，需要单实例就自己拿命名互斥量 |
 
 **独立模式下没有 Ghost 的任何东西，包括在 Ghost 正在运行时。** token 只经宿主握手发放，没有「后来附着上去」的路——那需要一条不经用户确认就把凭据交给任意本地进程的通道，正是整个身份设计要避免的。想要 Ghost 的数据，就从 Ghost 里启用它。
@@ -187,7 +187,7 @@ hosted = "GHOST_PLUGIN_ID" in os.environ
 | 超时 | 在 `kHandshakeTimeoutMs` 内必须写完这一行，否则 `plugin_handshake_timeout`，进程被终止、不重拉。**stdout 关闭而进程还活着**按同一条处理（等到超时，不当成退出） |
 | 长度 | 第一行最长 `kMaxHandshakeLineBytes`（4 KB）；超过而仍无 `\n` 立刻判 `plugin_handshake_invalid`，不等到超时 |
 | 只读第一行 | 第一行之后的 stdout **一律丢弃**，不转日志。一个话多的插件不该能撑爆宿主，也不该能借宿主往主进程日志里灌东西。要记日志用 `log.write` 权限，那条路上有限流 |
-| `uiUrl` | 清单 `ui.embedded == true` 时必填；必须匹配 `^http://127\.0\.0\.1:\d{1,5}/`，否则该字段被丢弃并按无界面处理 |
+| `uiUrl` | 清单 `ui.embedded == true` 时必填；必须匹配 `^http://127\.0\.0\.1:\d{1,5}/`，否则该字段被丢弃并按无界面处理。它既是插件页 iframe 的地址，也是用户点「在新窗口打开」时 Ghost 托管的独立窗口的地址（PR ⑨） |
 | `ok:false` | 按 `plugin_declined` 处理，**不重拉** —— 插件自己说了不行，重试三次也还是不行。⚠️ 插件的 `error` 文本**不会**到达主进程：宿主 → 主进程的状态体里 `error` 只收码（§4），日志里只有 `plugin_declined` 这个码并注明「原因不经协议传递」。要看原因，独立运行插件 |
 | 编码 | UTF-8，不带 BOM，以 `\n` 结尾 |
 
@@ -221,7 +221,7 @@ with socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandl
 
 宿主持 `hello` 里那个 token，请求头 **`X-Ghost-Host-Token`**，`Origin: http://127.0.0.1:23551`。
 
-> ⚠️ **不是 `X-Ghost-Token`。** 身份按头名区分（[`spec-plugin-api.md`](spec-plugin-api.md) §1）：用会话头就会被判成界面自己，于是宿主能调全部命令（现 50 条路由），包括读明文上游凭据、改配置、启动注入。而插件进程是宿主的**子进程**，同用户同完整性级别，`OpenProcess(PROCESS_VM_READ)` 就能把宿主内存里的 token 读走——给宿主一把全权钥匙等于绕过整个权限表把它给了插件。
+> ⚠️ **不是 `X-Ghost-Token`。** 身份按头名区分（[`spec-plugin-api.md`](spec-plugin-api.md) §1）：用会话头就会被判成界面自己，于是宿主能调全部命令（现 56 条路由），包括读明文上游凭据、改配置、启动注入。而插件进程是宿主的**子进程**，同用户同完整性级别，`OpenProcess(PROCESS_VM_READ)` 就能把宿主内存里的 token 读走——给宿主一把全权钥匙等于绕过整个权限表把它给了插件。
 >
 > `Host` 身份的白名单**恰好一条**：`plugin.status`。别的命令一律 403。
 
@@ -236,6 +236,8 @@ with socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandl
 > 顶层键是 **`entries`**，与既有的 `log.ingest` 一致 —— 两个端点在文档里被称作「同一个模板」，那就该连信封也一样，否则「同一个模板」这句话每读一次都要在脑子里打个折。这里**不带 `v`**，同样与 `log.ingest` 对齐（stdin 那条通道才带 `v`，它是跨进程线格式；这条是本机 HTTP，版本随应用走）。
 
 每条的字段：`pluginId`、`state`，可选 `uiUrl`、`pid`（1..2^32-1）、`exitCode`（DWORD，NTSTATUS 也要完整到达）、`restarts`（0..`kMaxRestarts`），以及 **`error`（PR ③ 新增，可选）**：宿主自己能产生的 [`spec-errors.md`](spec-errors.md) §5 码之一（`plugin_entry_missing` / `plugin_spawn_failed` / `plugin_handshake_timeout` / `plugin_handshake_invalid` / `plugin_declined` / `plugin_crashed` / `plugin_restart_exhausted`，`IsHostReportedCode`）。不收自由文本（那是一条往用户眼前放任意字的路），也不收主进程自己的码（宿主没资格替主进程说它失败了）——别的值**丢这个字段**。宿主的状态：`declined`、握手超时/非法、入口缺失、拉不起来都报 `crashed` 加对应的码且不重拉；意外退出每次重拉前报 `crashed`/`plugin_crashed`，用尽报 `crashed`/`plugin_restart_exhausted`；稳定运行满 `kStableRunResetMs` 之后退出，重拉计数从零开始。
+
+⚠️ **报告的 `pid` 现在决定一个 socket 去哪（PR ⑩）。** 插件调 `upstream.tunnel` 时，Ghost 把经上游节点连好的 socket 用 `WSADuplicateSocketW` 复制进**这里报告的那个 pid**——请求体里的 pid 从不被读取，`HostBridge::TunnelTargetOf` 是它唯一的来源（要求 `running` + 有 pid + 有 token + 没有在途的 `start`；在途时 `states_` 里还是旧实例的 pid）。而报告只和发它的宿主一样诚实（`plugin-center.md` §7.11：插件读得到宿主 token，能为别的 id 伪造 `plugin.status`），所以复制之前 Ghost 打开那个进程、**持着句柄**核对它不是 WOW64（否则 `tunnel_unsupported`）、还活着、映像文件就是 `<pluginDir>\<entry>`（按文件 id，不按路径字符串；后两条任一不符即 `plugin_not_running`），而且都在任何网络 I/O 之前——一个伪造的 pid 换不来一次经用户代理的连接，更换不来一个 socket。于是宿主报的 `pid` 必须是它 `CreateProcessW` 出来的那个进程本身；只有 `.exe` 入口、`runtime.kind` 为 `none` 的插件能用隧道，别的一律 `tunnel_unsupported`。
 
 宿主一侧：一次 POST 失败（连不上、非 200）**重发一次**，隔 500 ms，停止会取消这次重发；之后不再重试——下一次状态变化本身就是完整的陈述。主进程一侧另有兜底：报过 `running` 的 pid 已不存在而没有任何报告时，bridge 每秒一次的检查把它改成 `crashed`/`plugin_crashed`。
 

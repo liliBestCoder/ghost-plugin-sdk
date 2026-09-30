@@ -35,6 +35,7 @@
 | 项 | 值 | 常量 |
 |---|---|---|
 | 整个 `.gpkg` | **64 MB**。store 格式下包体就是解压后的总量；包整个读进内存校验后才写盘 | `kMaxPackageBytes` |
+| 从本地安装的请求体（PR ⑦） | **恰好 `kMaxPackageBytes`**，**只对会话身份、只这一条路由**（`POST /api/plugins/install-local`，`http_router.h` 的 `BodyCeiling`）；其余任何路由、任何身份的请求体上限都是 **2 MB**。请求头决定一切：超限答 413 且一个字节的体都不读；`chunked` 答 411；每进程同一时刻至多**一个**超过 2 MB 上限的请求在读体（第二个 503），读体 30 秒空闲即断、总时限 `kPackageTimeoutMs` | `kMaxPackageBytes` / `ghost_http::kDefaultMaxBodyBytes` |
 | 单条目 | **64 MB** | `kMaxEntryBytes` |
 | 条目数 | **4096** | `kMaxEntries` |
 | 条目名 | ≤ **240** 字节 UTF-8，规则见 `src/shared/policy_zip_name.h` | `ghost_zip::kMaxZipEntryNameBytes` |
@@ -97,7 +98,7 @@ store-only 意味着没有 zip bomb：压缩比恒为 1，所以没有压缩比�
 | `author.name` | ≤ **64** 个码点 | `kMaxAuthorChars` |
 | `args` | ≤ **16** 条，每条 ≤ **256** 字节（UTF-8） | `kMaxArgs` / `kMaxArgBytes` |
 | `runtime.minVersion` | `^[0-9]{1,5}(\.[0-9]{1,5}){0,2}$`（解释器自己的版本，一到三段，允许前导零） | `plugin_docs.h` 的 `IsRuntimeVersion` |
-| `permissions` | 只认 [`spec-plugin-api.md`](spec-plugin-api.md) §2 那六个名字 | `ghost_plugin::IsKnownPermission`（`plugin_docs.h`） |
+| `permissions` | 只认 [`spec-plugin-api.md`](spec-plugin-api.md) §2 那七个名字（`upstream.connect` 是 PR ⑩ 的第七个，发布描述的 `minAppVersion` 要 ≥ `1.2.1`；它还要 `.exe` 入口与 `runtime.kind` 为 `none`——这两条是 `gpkg.py pack` 的工具检查，客户端解析器不判，见 `spec-manifest.md` §2） | `ghost_plugin::IsKnownPermission`（`contract_plugin_permissions.h`） |
 
 「字符」一律指 **Unicode 码点**（Python 的 `len()` 数的那个），「字节」指 UTF-8 字节——本节只有 `id` 与 `args` 按字节。
 
@@ -169,6 +170,25 @@ store-only 意味着没有 zip bomb：压缩比恒为 1，所以没有压缩比�
 | 生命期 | 跟 token 所在的那条运行记录走。**沿用**（不回满）只有两种情况：记录还在时的再次启用（中间没有停用），与换版本（新 token）。**先停用再启用拿到新桶**——停用会删掉那条运行记录，桶随之而去；卸载同理 | — |
 | 同时打开的 `/events` 流 | 每插件至多 2 条；第 3 条答 429 `rate_limited`；流结束（包括 token 被撤销而被服务端结束）即归还名额 | `kMaxPluginEventStreams` |
 | `plugin.icon` 读取上限 | `kMaxIconBytes` = 256 KB（与包内图标上限同一个数） | `kMaxIconBytes` |
+
+### 7.2 上游隧道（PR ⑩，`upstream.connect`）
+
+[`spec-plugin-api.md`](spec-plugin-api.md) §10。每一次 `upstream.list` / `upstream.tunnel` 另外照常花 §7.1 的一次调用——调用预算就是一个插件能让 Ghost 经用户节点开连接的频率上限；下表约束的是**同时**有多少。
+
+| 项 | 值 | 常量（`contract_plugin_limits.h`） |
+|---|---|---|
+| 一次隧道请求的总截止时间（连接节点 + 握手，一个 `steady_clock` 截止时间，UDP 的 ASSOCIATE 也在其中） | **10 秒** | `kTunnelDeadlineMs` |
+| 其中到节点的 TCP 连接本身 | **5 秒**（超过答 `upstream_unreachable`，不是 `upstream_timeout`） | `kTunnelConnectMs` |
+| 插件等一次隧道答复**至少**要等多久 | **30 秒**。文档性常量，Ghost 不执行它：提前放弃的插件会丢掉一个已经复制进自己进程的 socket，句柄泄漏到进程退出 | `kTunnelClientWaitMs` |
+| 同时在建的隧道（每个都是一条阻塞在连接/握手里的请求线程） | 每插件 **8**、全局 **32** | `kMaxPluginTunnelsInFlight` / `kMaxTunnelsInFlight` |
+| 同时存在的 UDP 中继 | 每插件 **32**、全局 **128**（一个 `WSAPoll` 线程服务全部） | `kMaxPluginUdpRelays` / `kMaxUdpRelays` |
+| UDP 中继空闲拆除（两个方向都没有数据报） | **120 秒**（成功答复里的 `idleTimeoutMs`） | `kUdpRelayIdleMs` |
+| UDP 数据报负载 | `65507 − SOCKS5 头长`（成功答复里的 `maxPayload`；超出的数据报丢弃） | — |
+| `host` | ≤ **253** 字节（DNS 名字上限，也是 SOCKS5 域名长度字节与 CONNECT 行要承载的最大值）；语法见 `spec-plugin-api.md` §10.3 | `kMaxTunnelHostBytes` |
+| `nodeId` | `^[A-Za-z0-9_.-]{1,64}$` | `kMaxNodeIdBytes` |
+| `WSAPROTOCOL_INFOW` | **628** 字节（`protocolInfoBytes`；解码后必须恰好等于它才收养） | — |
+
+超出在途或中继上限答 `tunnel_limit`。主进程一侧另有两个值不在 `contract_plugin_limits.h` 里——它们是 Ghost 怎么对待自己的中继，不是协议的一部分（`plugin_tunnel.h` 的 `BrokerConfig` 默认值，组装根只设了日志）：已建 UDP 中继的「空闲 / 进程已退出 / 仍被允许」核对**每 1 秒**一次（`checkEveryMs`）；上游类失败的 Warn 按（插件、节点、码）**每 60 秒至多一条**（`warnEveryMs`），下一条带上被压下的次数。
 
 ## 8. 商店桥
 
