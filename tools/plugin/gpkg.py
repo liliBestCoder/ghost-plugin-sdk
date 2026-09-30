@@ -28,6 +28,11 @@ src/shared/policy_zip_name.h and the archive layout of src/platform/zip_read.h
 install failing. The two must change together; when they disagree, the C++
 side is right.
 
+A few checks go further than the host, and say so with tool-only codes:
+`pack` refuses a --min-app-version older than a declared permission's first
+release (min_app_version_too_low) and an upstream.connect plugin whose entry
+is not an .exe run directly (entry_kind_unsupported) -- see check_tool_rules.
+
 Exit codes: 0 ok, 1 a check failed ("error: <spec-errors code>: <why>"),
 2 usage error or `cryptography` missing.
 """
@@ -68,8 +73,23 @@ MAX_SEQ = 2 ** 63 - 1                   # LLONG_MAX
 # spec-plugin-api.md §2 -- the v1 permission names.
 PERMISSIONS = frozenset({
     "events.read.control", "events.read.data", "stats.read",
-    "config.read", "log.write", "plugin.assets",
+    "config.read", "log.write", "plugin.assets", "upstream.connect",
 })
+# The first Ghost release that grants a permission. `pack` refuses a
+# --min-app-version below it: an older Ghost refuses the manifest outright
+# (unknown_permission), so a release claiming it runs there is a lie a user
+# finds out about at install time. TOOL-ONLY -- the host never reads this.
+PERMISSION_MIN_APP = {"upstream.connect": "1.2.1"}
+# Permissions the broker serves only to a native .exe entry with runtime kind
+# "none": for upstream.connect the host bridge's tunnel-target lookup refuses
+# every other combination (tunnel_unsupported) before it duplicates the
+# connected socket into the reported PID. For a script entry that PID is
+# cmd.exe or the interpreter, not the plugin's own code; an .exe entry that
+# declares a runtime is still started directly, and is refused only because
+# the rule is one rule (host_bridge.cpp TunnelTargetOf). Either way such a
+# plugin could never use the permission. TOOL-ONLY as well: ParseManifest
+# (plugin_docs.h) accepts the combination; the refusal comes at run time.
+EXE_ONLY_PERMISSIONS = frozenset({"upstream.connect"})
 CATEGORIES = frozenset({"network", "dev", "security", "productivity", "other"})
 ENTRY_EXTENSIONS = (".exe", ".cmd", ".bat", ".py", ".js", ".mjs")
 ICON_EXTENSIONS = (".png", ".webp")
@@ -845,6 +865,26 @@ def _is_reparse(path):
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
+def check_tool_rules(manifest, min_app_version):
+    """The checks `pack` makes that the host does NOT (validate_manifest stays
+    the C++ mirror). Codes are tool-only, not in spec-errors.md:
+    min_app_version_too_low, entry_kind_unsupported."""
+    perms = manifest.get("permissions", [])
+    for p in sorted(set(perms)):
+        need = PERMISSION_MIN_APP.get(p)
+        if need is not None and version_key(min_app_version) < version_key(need):
+            raise GpkgError("min_app_version_too_low",
+                            "permission %s needs Ghost %s or later; pass --min-app-version %s (or higher)"
+                            % (p, need, need))
+    exe_only = sorted(set(perms) & EXE_ONLY_PERMISSIONS)
+    if exe_only:
+        kind = manifest.get("runtime", {}).get("kind", "none")
+        if not _ascii_lower(manifest["entry"]).endswith(".exe") or kind != "none":
+            raise GpkgError("entry_kind_unsupported",
+                            "permission %s needs an .exe entry and runtime kind \"none\" "
+                            "(entry %r, runtime kind %r)" % (", ".join(exe_only), manifest["entry"], kind))
+
+
 def pack(src, out, min_app_version=DEFAULT_MIN_APP_VERSION, released_at=None):
     """Validates src/manifest.json, writes out/<id>-<version>.gpkg (store-only,
     canonical layout, no comment) and out/ghost-plugin.json. Returns the two
@@ -856,6 +896,7 @@ def pack(src, out, min_app_version=DEFAULT_MIN_APP_VERSION, released_at=None):
         raise GpkgError("manifest_missing", "%s does not exist" % manifest_path)
     with open(manifest_path, "rb") as f:
         manifest = validate_manifest(f.read())
+    check_tool_rules(manifest, min_app_version)
 
     real_src = os.path.normcase(os.path.realpath(src))
     real_out = os.path.normcase(os.path.realpath(out))
@@ -1090,7 +1131,10 @@ def main(argv=None):
     p = sub.add_parser("pack", help="validate manifest.json and build the .gpkg + ghost-plugin.json")
     p.add_argument("--src", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--min-app-version", default=DEFAULT_MIN_APP_VERSION)
+    p.add_argument("--min-app-version", default=DEFAULT_MIN_APP_VERSION,
+                   help="the oldest Ghost the release claims to run on (default %s); "
+                        "a manifest declaring %s" % (DEFAULT_MIN_APP_VERSION, "; ".join(
+                            "%s needs %s or later" % kv for kv in sorted(PERMISSION_MIN_APP.items()))))
     p = sub.add_parser("sign", help="sign ghost-plugin.json")
     p.add_argument("--key", required=True)
     p.add_argument("--dist", required=True)
