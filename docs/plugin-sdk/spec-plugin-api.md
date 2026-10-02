@@ -254,11 +254,15 @@ WSAPROTOCOL_INFOW info;
 memcpy(&info, decoded, sizeof info);
 SOCKET s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
                       &info, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+if (s != INVALID_SOCKET && !SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0)) {
+    closesocket(s);                    // 清不掉就别用：它会被你拉起的子进程继承
+    s = INVALID_SOCKET;
+}
 ```
 
 - 大小对不上就**别调** `WSASocketW`——那是一次读越界。
 - **`info` 只能用一次。** 复制出来的是一个句柄，收养一次就消费了它；再收养一次不会得到第二个连接。
-- 带 `WSA_FLAG_NO_HANDLE_INHERIT`：否则你之后拉起的每个子进程都会继承一条经用户代理的连接。
+- **必须再调一次 `SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0)`。** 收养时传的 `WSA_FLAG_NO_HANDLE_INHERIT` **管不到**这个句柄：它是 Ghost 用 `WSADuplicateSocketW` 在你进程里**事先**建好的，生来可继承（实测 Windows 11 26100，TCP 与 UDP 都是；Ghost 的 `test_plugin_tunnel` 有一行钉住这个行为）。不清掉，你之后用 `bInheritHandles=TRUE` 拉起的每个子进程都会继承一条经用户代理的连接。更早的句柄可继承窗口（Ghost 复制之后、你收到答复之前）你关不掉，所以插件**不要**用 `bInheritHandles=TRUE` 拉子进程；要继承就用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 列出确切的句柄。`WSA_FLAG_NO_HANDLE_INHERIT` 照传无害。
 - TCP 的 socket 是**阻塞模式、没有收发超时**，也没挂任何事件或完成端口——按你自己的需要设（`TCP_NODELAY`、keepalive、超时）。TCP 隧道一经交出就完全是你的：Ghost 不跟踪它，停用插件、改节点都不会关掉它（停用会停掉你的进程，那时它随进程关闭）。
 - `getpeername` 显示的是**节点的地址**（你连着的是节点，目的地在它后面）。拿地址不需要任何权限，这不是泄漏，但也意味着节点地址对你不是秘密。
 
